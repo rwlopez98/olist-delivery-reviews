@@ -181,7 +181,7 @@ def get_themes(review_batch, model="claude-haiku-4-5"):
             model=model, max_tokens=2000,
             messages=[{"role": "user", "content": prompt}]).content[0].text
         try:
-            rows = parse_json_array(text)                # strips ```fences```, grabs outer [...]
+            rows = parse_json_array(text)                # strips markdown fences, grabs outer [...]
             for r in rows:                               # clamp unknown labels to "other"
                 if r["theme"] not in THEME_VOCAB: r["theme"] = "other"
             return rows

@@ -1,6 +1,6 @@
 # Phase 2 — Porting to Zerve (step-by-step checklist)
 
-> **The clean, canonical block layout is [`../zerve_notebook.py`](../zerve_notebook.py)** — 22 delimited blocks (materialized bronze→silver→gold on disk, one setup block, no repeated imports). Paste those into a fresh Zerve project. This checklist below is the porting *rationale + probes*; the notebook file is the deliverable.
+> **The canonical deliverable is [`../zerve_notebook.ipynb`](../zerve_notebook.ipynb)** — 25 cells: narrative markdown + dark-themed code, bronze→silver→gold materialized to disk, and two "how it was built" cells that display the sentiment + theming generation code. Copy cells into a fresh Zerve project. Narrative source lives in [`notebook_narrative.md`](./notebook_narrative.md); this checklist is the porting *rationale + probes*.
 
 
 Everything was built + verified offline. The port is mechanical, but a few Zerve behaviors
