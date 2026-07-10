@@ -75,6 +75,8 @@ def load_gold(con=None) -> pd.DataFrame:
 def add_features(gold: pd.DataFrame) -> pd.DataFrame:
     """Derive the spine's analytical columns from Gold's raw delivery dates + score."""
     df = gold.copy()
+    # has_text may arrive as bool (DuckDB) or 0/1 int (portable Zerve SQL) — normalize.
+    df["has_text"] = df["has_text"].astype(bool)
     delivered = pd.to_datetime(df["order_delivered_customer_date"])
     estimated = pd.to_datetime(df["order_estimated_delivery_date"])
 
