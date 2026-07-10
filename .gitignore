@@ -1,0 +1,17 @@
+# Secrets — never commit
+.env
+
+# Python environment (rebuild from requirements.txt) and caches
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Raw Kaggle data — large (~170 MB); re-fetch via kagglehub (see README)
+data/raw/
+
+# Run logs
+*.log
+
+# NOTE: data/cache/*.pkl and reports/figures/ ARE committed on purpose, so the
+# notebook runs top-to-bottom from cache without an Anthropic key.
