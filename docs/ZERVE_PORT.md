@@ -1,5 +1,8 @@
 # Phase 2 — Porting to Zerve (step-by-step checklist)
 
+> **The clean, canonical block layout is [`../zerve_notebook.py`](../zerve_notebook.py)** — 22 delimited blocks (materialized bronze→silver→gold on disk, one setup block, no repeated imports). Paste those into a fresh Zerve project. This checklist below is the porting *rationale + probes*; the notebook file is the deliverable.
+
+
 Everything was built + verified offline. The port is mechanical, but a few Zerve behaviors
 must be *probed* first (marked 🔎) — like the offline smoke-test, discover walls before
 building on them. Work top to bottom; verify (✅) after each stage.
