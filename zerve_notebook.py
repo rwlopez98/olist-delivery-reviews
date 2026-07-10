@@ -13,9 +13,31 @@
 
 # ========== BLOCK 0 · [md] Title =============================================
 # # Olist: Does Late Delivery Drive Low Review Scores — and Why?
-# **Thesis:** late delivery → low review score, and an LLM explains the mechanism.
-# **Arc:** SQL proves late→bad (quantitative) → sentiment quantifies it → an LLM themes the
-# negative reviews (generative). Bronze→Silver→Gold is materialized to disk with DuckDB.
+#
+# **The question.** Olist is a Brazilian e-commerce marketplace with ~100K orders and
+# customer reviews. Do late deliveries actually drive low review scores — and if so, what
+# exactly are customers upset about?
+#
+# **The answer, up front.** Decisively yes. On-time orders average **4.30★**; late orders
+# average **2.57★** — a 1.73-star collapse, with late orders 46% 1-star. And an LLM reading
+# the negative reviews shows *why*: the complaints are overwhelmingly about the **parcel**
+# (never arrived, arrived late), not the product.
+#
+# **How it's built — three layers, each cross-validating the next:**
+# 1. **SQL · bronze → silver → gold (DuckDB).** Joins and grain resolution to *one row per
+#    review*; undelivered orders excluded on the delivery-date null, items and payments
+#    pre-aggregated to order grain so lateness is never double-counted.
+# 2. **Sentiment · two methods.** A Portuguese transformer and LeIA (Portuguese VADER), each
+#    validated against the 1–5★ ground truth (**75% / 64%**) — external validity kept
+#    explicitly separate from model-vs-model agreement; disagreements inspected, not dropped.
+# 3. **Generative theming · LLM.** Structured output (theme + severity per review) re-joins
+#    the dataframe and drives the theme chart; a stability check confirms a review lands on
+#    the same theme **96%** of the time across runs.
+#
+# **Reproducible.** Expensive model outputs are cached and keyed to `review_id`, so the
+# notebook runs top-to-bottom from cache with no API calls.
+#
+# *Data: Olist Brazilian E-Commerce Public Dataset (Kaggle).*
 
 
 # ========== BLOCK 1 · Setup (all imports + constants + config) ===============
