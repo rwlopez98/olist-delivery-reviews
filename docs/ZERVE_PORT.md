@@ -89,7 +89,7 @@ Decision from 0.1/0.2:
 
 ### Standing gotchas
 - **Zerve env vs offline (probed):** Python 3.11.15, pandas 3.0.3, duckdb 1.5.4 all match — pickles load, tested SQL runs. BUT: `anthropic`/`torch` absent (load both pickles; can't regen sentiment in-Zerve), and **Seaborn is 0.12.x** which crashes on pandas 3.0 (`mode.use_inf_as_na` removed). Fix: `pip install -U "seaborn>=0.13.2"` + restart, or use a matplotlib histogram for Chart 2.
-- **Data isn't SQL-tabled** — the 9 CSVs are files in the working dir (bare filename). Native SQL blocks want a connection; run the SQL via **DuckDB in a Python block** reading `read_csv_auto('olist_*.csv')` instead.
+- **Native QUERY blocks don't work here (confirmed by Zerve's AI):** they're thin wrappers over an *external* warehouse (Postgres/Snowflake/…) — no DuckDB connection type, no file access, and the org has zero connections. Zerve's own recommended pattern for CSV→SQL is **DuckDB in a PYTHON block** (`read_csv_auto('olist_*.csv')`), which is what `zerve_notebook.py` does. Alternative (heavier): stand up Postgres, load the CSVs, use native QUERY blocks in Postgres dialect.
 - **Native GEN_AI blocks can't batch** — theming must stay the Anthropic-SDK Python loop (ADR-0001).
 - **UTF-8**: Portuguese text + `★` need UTF-8 stdout (native in Zerve; only a Windows-console issue offline).
 - **Keep accents** for LeIA; **key everything to `review_id`**, never row position.

@@ -1,22 +1,21 @@
 # =============================================================================
 # ZERVE NOTEBOOK — Olist: does late delivery drive low review scores, and why?
 #
-# One block per section (delimited below). Copy each block into a Zerve block in
-# order. The medallion is materialized to disk: bronze/silver/gold live as tables
-# in `olist.duckdb`, each silver + gold table is also written to .parquet, and the
-# pandas layer reads those files — nothing critical is memory-only, so a runtime
-# restart never forces a full re-run. [md] blocks are Markdown; the rest are Python.
+# Data layer = DuckDB-in-Python (Zerve's own recommended pattern: QUERY blocks need an
+# external warehouse; DuckDB in a PYTHON block runs SQL over the CSV files directly).
+# The medallion is materialized to disk: each layer runs SQL over the upstream FILES and
+# writes its output .parquet to the working dir, so the silver layer is visible on disk and
+# a runtime restart never forces a full re-run. [md] = Markdown block; else Python block.
 #
-# Prereq: the 9 Olist CSVs sit in the working dir (bare filenames resolve there).
-# Uploaded artifacts also in the working dir: sentiment.pkl, themes.pkl.
+# Working dir holds: the 9 Olist CSVs, plus uploaded sentiment.pkl and themes.pkl.
 # =============================================================================
 
 
 # ========== BLOCK 0 · [md] Title =============================================
 # # Olist: Does Late Delivery Drive Low Review Scores — and Why?
 # **Thesis:** late delivery → low review score, and an LLM explains the mechanism.
-# **Arc:** SQL proves late→bad (quantitative) → sentiment quantifies it → an LLM
-# themes the negative reviews (generative). Bronze→Silver→Gold is materialized on disk.
+# **Arc:** SQL proves late→bad (quantitative) → sentiment quantifies it → an LLM themes the
+# negative reviews (generative). Bronze→Silver→Gold is materialized to disk with DuckDB.
 
 
 # ========== BLOCK 1 · Setup (all imports + constants + config) ===============
@@ -25,26 +24,25 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.express as px
+import numpy as np
 
 sns.set_theme(style="whitegrid")
 OUTCOME_ORDER = ["On-time", "Late"]
 OUTCOME_PALETTE = {"On-time": "#4c9f70", "Late": "#d1495b"}
 
-DB = "olist.duckdb"   # persistent medallion store (bronze/silver/gold tables)
-
 # GenAI regeneration: False = load the cached pickle (needs no API key / no torch).
-REGENERATE_SENTIMENT = False   # sentiment needs torch to rebuild — keep False in Zerve
-REGENERATE_THEMES = False      # theming needs `pip install anthropic` + a key to rebuild
+REGENERATE_SENTIMENT = False   # rebuild needs torch (absent in Zerve) — keep False
+REGENERATE_THEMES = False      # rebuild needs `pip install anthropic` + a key
 print("setup ready · duckdb", duckdb.__version__, "· pandas", pd.__version__)
 
 
 # ========== BLOCK 2 · [md] Bronze ============================================
-# **Bronze** acknowledges all nine auto-loaded tables and scopes to the delivery→review
+# **Bronze** acknowledges all nine auto-loaded CSVs and scopes to the delivery→review
 # spine. Out-of-spine (named, unused): `olist_products_dataset`, `olist_sellers_dataset`,
-# `product_category_name_translation`.
+# `product_category_name_translation`. The raw CSVs *are* the bronze layer.
 
 
-# ========== BLOCK 3 · Bronze (scope raw tables as views) =====================
+# ========== BLOCK 3 · Bronze (scope) =========================================
 BRONZE = {
     "orders":         "olist_orders_dataset",
     "order_reviews":  "olist_order_reviews_dataset",
@@ -53,30 +51,34 @@ BRONZE = {
     "customers":      "olist_customers_dataset",
     "geolocation":    "olist_geolocation_dataset",
 }
-con = duckdb.connect(DB)
-for view, csv in BRONZE.items():
-    con.execute(f"CREATE OR REPLACE VIEW {view} AS SELECT * FROM read_csv_auto('{csv}.csv')")
-print("Bronze scoped to spine:", ", ".join(BRONZE))
-con.close()
+counts = {v: duckdb.sql(f"SELECT COUNT(*) FROM read_csv_auto('{c}.csv')").fetchone()[0]
+          for v, c in BRONZE.items()}
+print("Bronze scoped to spine:")
+for v, n in counts.items():
+    print(f"  {v:15} {n:>9,}")
 
 
 # ========== BLOCK 4 · [md] Silver ============================================
-# **Silver** cleans, resolves the grain, and pre-aggregates — every grain explosion is
-# settled here. Undelivered orders are excluded on the null delivery *date* (not canceled
-# status: the null population spans 7 statuses and ≠ canceled). Reviews are deduped to one
-# row per `review_id` among delivered orders, with `order_id` as a deterministic tiebreaker
-# (ADR-0002). Items/payments collapse to order grain; geolocation to one point per zip.
+# **Silver** cleans, resolves grain, pre-aggregates — every grain explosion settled here.
+# Undelivered orders excluded on the null delivery *date* (not canceled status: the null
+# population spans 7 statuses and ≠ canceled). Reviews deduped to one row per `review_id`
+# among delivered orders, `order_id` as deterministic tiebreaker (ADR-0002). Items/payments
+# → order grain; geolocation → one point per zip. Each table written to .parquet.
 
 
-# ========== BLOCK 5 · Silver (materialize + show each table) =================
-con = duckdb.connect(DB)
+# ========== BLOCK 5 · Silver (SQL over CSVs → parquet, shown) ================
+con = duckdb.connect()
+for view, csv in {"orders": "olist_orders_dataset", "order_reviews": "olist_order_reviews_dataset",
+                  "order_items": "olist_order_items_dataset", "order_payments": "olist_order_payments_dataset",
+                  "geolocation": "olist_geolocation_dataset"}.items():
+    con.execute(f"CREATE VIEW {view} AS SELECT * FROM read_csv_auto('{csv}.csv')")
 con.execute("""
-CREATE OR REPLACE TABLE orders_clean AS
+CREATE TABLE orders_clean AS
   SELECT order_id, customer_id, order_status, order_purchase_timestamp,
          order_delivered_customer_date, order_estimated_delivery_date
   FROM orders WHERE order_delivered_customer_date IS NOT NULL;
 
-CREATE OR REPLACE TABLE reviews_dedup AS
+CREATE TABLE reviews_dedup AS
   SELECT * EXCLUDE (rn) FROM (
     SELECT rev.*, ROW_NUMBER() OVER (
              PARTITION BY rev.review_id
@@ -84,57 +86,51 @@ CREATE OR REPLACE TABLE reviews_dedup AS
                       rev.review_answer_timestamp DESC, rev.order_id) AS rn
     FROM order_reviews rev JOIN orders_clean USING (order_id)) WHERE rn = 1;
 
-CREATE OR REPLACE TABLE order_items_agg AS
+CREATE TABLE order_items_agg AS
   SELECT order_id, COUNT(*) n_items, COUNT(DISTINCT seller_id) n_sellers,
          SUM(price) items_total, SUM(freight_value) freight_total
   FROM order_items GROUP BY order_id;
 
-CREATE OR REPLACE TABLE order_payments_agg AS
+CREATE TABLE order_payments_agg AS
   SELECT order_id, SUM(payment_value) payment_total, COUNT(*) n_payments,
          MAX(payment_installments) max_installments
   FROM order_payments GROUP BY order_id;
 
-CREATE OR REPLACE TABLE geolocation_centroid AS
+CREATE TABLE geolocation_centroid AS
   SELECT geolocation_zip_code_prefix zip_prefix, AVG(geolocation_lat) lat,
          AVG(geolocation_lng) lng, ANY_VALUE(geolocation_state) geo_state
   FROM geolocation GROUP BY geolocation_zip_code_prefix;
 """)
-for t in ["orders_clean", "reviews_dedup", "order_items_agg",
-          "order_payments_agg", "geolocation_centroid"]:
+for t in ["orders_clean", "reviews_dedup", "order_items_agg", "order_payments_agg", "geolocation_centroid"]:
     con.execute(f"COPY {t} TO '{t}.parquet' (FORMAT parquet)")
-    n = con.sql(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
-    print(f"{t:22} {n:>8,} rows  ->  {t}.parquet")
+    print(f"{t:22} {con.sql(f'SELECT COUNT(*) FROM {t}').fetchone()[0]:>8,}  ->  {t}.parquet")
 con.close()
 
 
 # ========== BLOCK 6 · [md] Gold ==============================================
 # **Gold** — one row per review, delivery facts joined on, order-grain summaries attached.
-# The INNER join to `orders_clean` enforces the exclusion; review text is kept for the
-# sentiment + theming layers. Written to `gold.parquet` for the pandas layer.
+# Reads the silver .parquet files; the INNER join to orders_clean enforces the exclusion.
+# Written to `gold.parquet` and passed downstream as `gold`.
 
 
-# ========== BLOCK 7 · Gold (materialize + verify grain) ======================
-con = duckdb.connect(DB)
-con.execute("""
-CREATE OR REPLACE TABLE gold_reviews AS
-  SELECT r.review_id, r.order_id, r.review_score, r.review_comment_title, r.review_comment_message,
-         (r.review_comment_message IS NOT NULL) AS has_text,
-         o.order_purchase_timestamp, o.order_delivered_customer_date, o.order_estimated_delivery_date,
-         c.customer_unique_id, c.customer_state, c.customer_zip_code_prefix, c.customer_city,
-         g.lat AS customer_lat, g.lng AS customer_lng,
-         i.n_items, i.n_sellers, i.items_total, i.freight_total,
-         p.payment_total, p.max_installments
-  FROM reviews_dedup r
-  JOIN orders_clean o USING (order_id)
-  JOIN customers c USING (customer_id)
-  LEFT JOIN order_items_agg i USING (order_id)
-  LEFT JOIN order_payments_agg p USING (order_id)
-  LEFT JOIN geolocation_centroid g ON c.customer_zip_code_prefix = g.zip_prefix;
-""")
-con.execute("COPY gold_reviews TO 'gold.parquet' (FORMAT parquet)")
-n, u = con.sql("SELECT COUNT(*), COUNT(DISTINCT review_id) FROM gold_reviews").fetchone()
-print(f"gold_reviews {n:,} rows · unique review_id: {n == u}  ->  gold.parquet")
-con.close()
+# ========== BLOCK 7 · Gold (join silver parquets → gold.parquet) =============
+gold = duckdb.sql("""
+    SELECT r.review_id, r.order_id, r.review_score, r.review_comment_title, r.review_comment_message,
+           (r.review_comment_message IS NOT NULL) AS has_text,
+           o.order_purchase_timestamp, o.order_delivered_customer_date, o.order_estimated_delivery_date,
+           c.customer_unique_id, c.customer_state, c.customer_zip_code_prefix, c.customer_city,
+           g.lat AS customer_lat, g.lng AS customer_lng,
+           i.n_items, i.n_sellers, i.items_total, i.freight_total,
+           p.payment_total, p.max_installments
+    FROM 'reviews_dedup.parquet' r
+    JOIN 'orders_clean.parquet' o USING (order_id)
+    JOIN read_csv_auto('olist_customers_dataset.csv') c USING (customer_id)
+    LEFT JOIN 'order_items_agg.parquet' i USING (order_id)
+    LEFT JOIN 'order_payments_agg.parquet' p USING (order_id)
+    LEFT JOIN 'geolocation_centroid.parquet' g ON c.customer_zip_code_prefix = g.zip_prefix
+""").df()
+duckdb.sql("COPY (SELECT * FROM gold) TO 'gold.parquet' (FORMAT parquet)")
+print(f"gold {len(gold):,} rows · unique review_id: {gold['review_id'].is_unique}  ->  gold.parquet")
 
 
 # ========== BLOCK 8 · [md] 🥇 The SQL / pandas seam ==========================
@@ -162,13 +158,13 @@ print("late %.1f%% · negative %.1f%%" % (df["is_late"].mean()*100, df["is_negat
 
 
 # ========== BLOCK 11 · Retention-kill ========================================
-con = duckdb.connect(DB)
-pct = con.sql("""
+pct = duckdb.sql("""
   WITH per AS (SELECT c.customer_unique_id, COUNT(*) n
-               FROM orders o JOIN customers c USING (customer_id) GROUP BY 1)
+               FROM read_csv_auto('olist_orders_dataset.csv') o
+               JOIN read_csv_auto('olist_customers_dataset.csv') c USING (customer_id)
+               GROUP BY 1)
   SELECT ROUND(100.0*COUNT(*) FILTER (WHERE n = 1)/COUNT(*), 1) FROM per
 """).fetchone()[0]
-con.close()
 print(f"{pct}% of customers order exactly once -> retention angle killed with evidence")
 
 
@@ -184,10 +180,9 @@ ax.set_title("Late deliveries collapse into 1-star reviews"); ax.legend(title="D
 plt.show()
 
 
-# ========== BLOCK 13 · Chart 2 — delivery-gap distribution ===================
-# matplotlib (not seaborn.histplot) — Zerve's Seaborn 0.12 crashes on pandas 3.0
+# ========== BLOCK 13 · Chart 2 — delivery-gap distribution (matplotlib) =======
+# matplotlib, not seaborn.histplot — Zerve's Seaborn 0.12 crashes on pandas 3.0
 # (`mode.use_inf_as_na` was removed). Same stacked distribution, no dependency surgery.
-import numpy as np
 gap = df["delivery_gap_days"].clip(-30, 60)
 fig, ax = plt.subplots(figsize=(8, 5))
 ax.hist([gap[~df["is_late"]], gap[df["is_late"]]], bins=np.linspace(-30, 60, 61),
@@ -234,8 +229,8 @@ print(themes["theme"].value_counts().to_dict())
 
 # ========== BLOCK 18 · [md] 🥇 Structured output re-joins the dataframe =======
 # The LLM themes (structured: theme, severity, review_id) re-join Gold and drive Chart 3.
-# Batching is forced by the context window; a stability check (offline) found a review
-# lands on the same theme 95.7% of the time across runs — the answer to "did it hallucinate?"
+# Batching is forced by the context window; an offline stability check found a review lands
+# on the same theme 95.7% of the time across runs — the answer to "did it hallucinate?"
 
 
 # ========== BLOCK 19 · Chart 3 — theme frequency, on-time/late split (Plotly) =
